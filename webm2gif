@@ -1,0 +1,24 @@
+#!/bin/bash
+# Usage: ./webm2gif.sh input.webm [output.gif] [width]
+
+#Usage:
+#  chmod +x webm2gif.sh
+#  ./webm2gif.sh video.webm                # output: video.gif, 480px wide
+#  ./webm2gif.sh video.webm out.gif 320    # custom output name and width
+#
+#  Install ffmpeg if needed:
+#  # Fedora
+#  sudo dnf install ffmpeg
+#
+#  # Ubuntu/Debian
+#  sudo apt install ffmpeg
+#
+#  The palettegen/paletteuse filters produce much better GIF quality than a naive conversion. Adjust fps=15 and the width to control file size.
+
+input="$1"
+output="${2:-${input%.webm}.gif}"
+width="${3:-480}"
+
+ffmpeg -i "$input" -vf "fps=15,scale=${width}:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" "$output"
+
+echo "Created: $output"
