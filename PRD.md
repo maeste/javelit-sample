@@ -95,14 +95,92 @@ enable cross-model or cross-hardware comparison.
 //DEPS org.icepear.echarts:echarts-java:1.0.7
 //DEPS com.google.code.gson:gson:2.11.0
 //DEPS org.apache.pdfbox:pdfbox:3.0.4
+
+//SOURCES model/BenchmarkEntry.java
+//SOURCES service/JsonParser.java
+//SOURCES service/ChartBuilder.java
+//SOURCES service/PdfReportGenerator.java
+//SOURCES pages/UploadPage.java
+//SOURCES pages/ExplorerPage.java
+//SOURCES pages/ReportPage.java
 ```
 
-- **Javelit**: UI framework
+- **Javelit**: UI framework (runs on top of JBang)
 - **echarts-java**: charting (via `Jt.echarts`)
 - **Gson**: JSON parsing
 - **Apache PDFBox**: PDF generation (simplest option, no commercial license needed)
 
-### 3.2 Page Structure
+### 3.2 Multi-File Classloading (CRITICAL)
+
+Javelit uses JBang under the hood. When organizing code into packages (`model/`, `service/`,
+`pages/`), there are **two separate compilation/classloading systems** at play, and both must
+be satisfied:
+
+#### System 1: JBang compilation (`//SOURCES`)
+
+JBang only compiles files explicitly listed via `//SOURCES` directives in the main `App.java`.
+Without these, JBang will compile `App.java` alone and fail on any `import model.BenchmarkEntry`
+etc. Add one `//SOURCES` line per source file, using relative paths from `App.java`:
+
+```java
+//SOURCES model/BenchmarkEntry.java
+//SOURCES service/JsonParser.java
+```
+
+#### System 2: Javelit's own compiler and runtime classpath (`-cp`)
+
+Javelit has its **own** Java compiler that discovers and compiles `.java` files in subdirectories
+to `target/javelit/classes/` (with correct package directory structure). However, Javelit's
+runtime classloader does **NOT** automatically include `target/javelit/classes/` on its classpath.
+
+This causes `NoClassDefFoundError` at runtime even though the `.class` files exist:
+```
+java.lang.NoClassDefFoundError: model/BenchmarkEntry
+    at service.JsonParser.mapEntry(JsonParser.java:33)
+```
+
+**Fix**: Pass `-cp target/javelit/classes/` when running the app:
+```bash
+javelit run App.java -cp target/javelit/classes/
+```
+
+#### System 3: External library JARs for source files
+
+Javelit's compiler resolves `//DEPS` declared in `App.java` for `App.java` itself, but those
+dependencies are **NOT** available to source files in subdirectories during Javelit's compilation.
+For example, `service/PdfReportGenerator.java` imports `org.apache.pdfbox.pdmodel.*`, but
+Javelit's compiler cannot find these classes.
+
+Adding `//DEPS` to the source file itself does NOT help — Javelit ignores `//DEPS` in non-main
+files.
+
+**Fix**: Place the required JAR files in a `lib/` directory and pass them via `-cp`:
+```bash
+javelit run App.java -cp "target/javelit/classes/:lib/pdfbox-3.0.4.jar:lib/fontbox-3.0.4.jar:lib/pdfbox-io-3.0.4.jar:lib/commons-logging-1.3.4.jar"
+```
+
+Note: `//DEPS` in `App.java` are still needed for JBang's compilation (System 1). The `lib/`
+JARs are needed for Javelit's own compiler (System 2). Both must be present.
+
+#### Summary of classloading requirements
+
+| What | Why | How |
+|------|-----|-----|
+| `//SOURCES` in App.java | JBang needs explicit source file list | One line per .java file |
+| `-cp target/javelit/classes/` | Javelit's classloader needs packaged classes | Pass via `-cp` flag |
+| `lib/*.jar` on `-cp` | Javelit's compiler needs external deps for source files | Download JARs to `lib/`, pass via `-cp` |
+| `//DEPS` in App.java | JBang needs Maven dependency resolution | Standard JBang syntax |
+
+#### Common errors and their causes
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `NoClassDefFoundError: model/BenchmarkEntry` | `target/javelit/classes/` not on runtime classpath | Add `-cp target/javelit/classes/` |
+| `package org.apache.pdfbox.pdmodel does not exist` | External JAR not available to Javelit's compiler | Add JAR to `lib/` and `-cp` |
+| `IllegalStateException: No active execution context` | Running with `jbang run` instead of `javelit run` | Use `javelit run` or `java -jar javelit.jar run` |
+| Stale classes from monolithic version | Old `App$InnerClass.class` files in `target/` | Run `rm -rf target/javelit/classes/` |
+
+### 3.3 Page Structure
 
 ```
 App.java (entry point with Jt.navigation)
@@ -434,25 +512,33 @@ BenchmarkEntry:
 | Multi-file upload | `acceptMultipleFiles(TRUE)` | Compare models/hardware from separate benchmark runs |
 | State sharing | `Jt.sessionState()` | Standard Javelit pattern for cross-page data |
 | No database | In-memory only | Demo app, data lives in session |
-| Single Java file vs multi-file | Multi-file with pages/ package | Cleaner organization for 3 pages + data model |
+| Single Java file vs multi-file | Multi-file with packages | Cleaner organization; requires `-cp` workaround (see §3.2) |
+| External JARs in `lib/` | PDFBox + transitive deps | Javelit's compiler can't resolve `//DEPS` for source files |
 
 ---
 
-## 8. File Structure (planned)
+## 8. File Structure
 
 ```
 javelit-sample/
-├── App.java                          # Entry point with Jt.navigation
+├── App.java                          # Entry point: //DEPS, //SOURCES, Jt.navigation
+├── run.sh                            # Launch script with correct -cp flags
 ├── pages/
 │   ├── UploadPage.java               # Page 1: Upload & Overview
 │   ├── ExplorerPage.java             # Page 2: Performance Explorer
 │   └── ReportPage.java               # Page 3: Report Generator
 ├── model/
-│   └── BenchmarkEntry.java           # Data model (record)
+│   └── BenchmarkEntry.java           # Data model class
 ├── service/
 │   ├── JsonParser.java               # Gson parsing of llama-bench JSON
 │   ├── ChartBuilder.java             # ECharts chart construction
 │   └── PdfReportGenerator.java       # PDFBox report generation
+├── lib/                              # External JARs for Javelit's compiler (see §3.2)
+│   ├── pdfbox-3.0.4.jar
+│   ├── fontbox-3.0.4.jar
+│   ├── pdfbox-io-3.0.4.jar
+│   └── commons-logging-1.3.4.jar
+├── target/javelit/classes/           # Auto-generated by Javelit compiler (do not commit)
 ├── lama-bench-rocm72-step35-imatrix.json  # Example data
 └── PRD.md                            # This document
 ```
@@ -485,7 +571,14 @@ javelit-sample/
 
 ## 11. Verification
 
-- Run: `javelit run App.java` → browser opens at localhost
+- Run: `./run.sh` or `javelit run App.java -cp "target/javelit/classes/:lib/*"` → browser opens at localhost:8080
 - Upload: drag `lama-bench-rocm72-step35-imatrix.json` → summary appears
 - Explore: navigate to Explorer → charts render with correct data
 - Report: navigate to Report → generate PDF → preview renders inline
+
+### Troubleshooting checklist
+
+1. **Clean stale classes**: `rm -rf target/javelit/classes/` before first run after refactoring
+2. **Clear JBang cache**: `jbang cache clear` if you changed `//DEPS` or `//SOURCES`
+3. **Check `-cp` flag**: Must include both `target/javelit/classes/` AND any `lib/*.jar` files
+4. **Use javelit, not jbang**: `jbang run App.java` will fail with `IllegalStateException` — always use `javelit run` or the javelit jar
